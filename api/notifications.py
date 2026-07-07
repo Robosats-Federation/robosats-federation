@@ -268,3 +268,19 @@ class Notifications:
 
         self.send_message(order, buyer.robot, title, description)
         return
+
+    def payout_policy_rejected(self, order):
+        admin_chat_id = config("TELEGRAM_COORDINATOR_CHAT_ID")
+
+        if len(admin_chat_id) == 0:
+            return
+
+        coordinator_text = (
+            f"Payout policy rejected a payout for order with ID {str(order.id)}."
+        )
+        coordinator_description = f"Visit http://{self.site}/coordinator/api/order/{str(order.id)}/change to inspect."
+        self.send_telegram_message(
+            admin_chat_id, coordinator_text, coordinator_description
+        )
+
+        return

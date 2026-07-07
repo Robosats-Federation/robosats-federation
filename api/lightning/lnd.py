@@ -20,6 +20,8 @@ from . import (
     router_pb2_grpc,
     signer_pb2,
     signer_pb2_grpc,
+    lnd_adapter,
+    payout_policy,
     verrpc_pb2,
     verrpc_pb2_grpc,
 )
@@ -28,21 +30,25 @@ from . import (
 # Works with LND (c-lightning in the future for multi-vendor resilience)
 #######
 
-# Read tls.cert from file or .env variable string encoded as base64
-try:
-    with open(os.path.join(config("LND_DIR"), "tls.cert"), "rb") as f:
-        CERT = f.read()
-except Exception:
-    CERT = b64decode(config("LND_CERT_BASE64"))
+if lnd_adapter.LND_ADAPTER_ENABLED:
+    CERT = b""
+    MACAROON = b""
+else:
+    # Read tls.cert from file or .env variable string encoded as base64
+    try:
+        with open(os.path.join(config("LND_DIR"), "tls.cert"), "rb") as f:
+            CERT = f.read()
+    except Exception:
+        CERT = b64decode(config("LND_CERT_BASE64"))
 
-# Read macaroon from file or .env variable string encoded as base64
-try:
-    with open(os.path.join(config("LND_DIR"), config("MACAROON_PATH")), "rb") as f:
-        MACAROON = f.read()
-except Exception:
-    MACAROON = b64decode(config("LND_MACAROON_BASE64"))
+    # Read macaroon from file or .env variable string encoded as base64
+    try:
+        with open(os.path.join(config("LND_DIR"), config("MACAROON_PATH")), "rb") as f:
+            MACAROON = f.read()
+    except Exception:
+        MACAROON = b64decode(config("LND_MACAROON_BASE64"))
 
-LND_GRPC_HOST = config("LND_GRPC_HOST")
+LND_GRPC_HOST = config("LND_GRPC_HOST", default="127.0.0.1:10009")
 DISABLE_ONCHAIN = config("DISABLE_ONCHAIN", cast=bool, default=True)
 MAX_SWAP_AMOUNT = config("MAX_SWAP_AMOUNT", cast=int, default=500_000)
 
@@ -76,10 +82,18 @@ class LNDNode:
         3: "A non-recoverable error has occured.",
         4: "Payment details incorrect (unknown hash, invalid amt or invalid final cltv delta)",
         5: "Insufficient local balance.",
+        6: "The payment was canceled.",
     }
 
     @classmethod
     def get_version(cls):
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            try:
+                return lnd_adapter.get_version()
+            except Exception as e:
+                print(f"Cannot get LND version through adapter: {e}")
+                return "Not installed"
+
         try:
             request = verrpc_pb2.VersionRequest()
             verstub = verrpc_pb2_grpc.VersionerStub(cls.channel)
@@ -93,6 +107,9 @@ class LNDNode:
     @classmethod
     def decode_payreq(cls, invoice):
         """Decodes a lightning payment request (invoice)"""
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            return lnd_adapter.decode_payreq(invoice)
+
         lightningstub = lightning_pb2_grpc.LightningStub(cls.channel)
         request = lightning_pb2.PayReqString(pay_req=invoice)
         response = lightningstub.DecodePayReq(request)
@@ -102,6 +119,13 @@ class LNDNode:
     @classmethod
     def estimate_fee(cls, amount_sats, target_conf=2, min_confs=1):
         """Returns estimated fee for onchain payouts"""
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            response = lnd_adapter.estimate_fee(amount_sats, target_conf, min_confs)
+            return {
+                "mining_fee_sats": response.fee_sat,
+                "mining_fee_rate": response.sat_per_vbyte,
+            }
+
         lightningstub = lightning_pb2_grpc.LightningStub(cls.channel)
         request = lightning_pb2.GetInfoRequest()
         response = lightningstub.GetInfo(request)
@@ -135,6 +159,14 @@ class LNDNode:
     @classmethod
     def wallet_balance(cls):
         """Returns onchain balance"""
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            response = lnd_adapter.wallet_balance()
+            return {
+                "total_balance": response.total_balance,
+                "confirmed_balance": response.confirmed_balance,
+                "unconfirmed_balance": response.unconfirmed_balance,
+            }
+
         lightningstub = lightning_pb2_grpc.LightningStub(cls.channel)
         request = lightning_pb2.WalletBalanceRequest()
         response = lightningstub.WalletBalance(request)
@@ -152,6 +184,15 @@ class LNDNode:
     @classmethod
     def channel_balance(cls):
         """Returns channels balance"""
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            response = lnd_adapter.channel_balance()
+            return {
+                "local_balance": response.local_balance.sat,
+                "remote_balance": response.remote_balance.sat,
+                "unsettled_local_balance": response.unsettled_local_balance.sat,
+                "unsettled_remote_balance": response.unsettled_remote_balance.sat,
+            }
+
         lightningstub = lightning_pb2_grpc.LightningStub(cls.channel)
         request = lightning_pb2.ChannelBalanceRequest()
         response = lightningstub.ChannelBalance(request)
@@ -187,6 +228,12 @@ class LNDNode:
             time.sleep(3 + delay)
 
         if onchainpayment.status == queue_code:
+            policy_result = payout_policy.handle_onchain_payment(
+                onchainpayment, request, on_mempool_code
+            )
+            if policy_result is not None:
+                return policy_result
+
             # Changing the state to "MEMPO" should be atomic with SendCoins.
             onchainpayment.status = on_mempool_code
             onchainpayment.save(update_fields=["status"])
@@ -214,6 +261,10 @@ class LNDNode:
     @classmethod
     def cancel_return_hold_invoice(cls, payment_hash):
         """Cancels or returns a hold invoice"""
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            lnd_adapter.cancel_return_hold_invoice(payment_hash)
+            return True
+
         request = invoices_pb2.CancelInvoiceMsg(
             payment_hash=bytes.fromhex(payment_hash)
         )
@@ -226,6 +277,10 @@ class LNDNode:
     @classmethod
     def settle_hold_invoice(cls, preimage):
         """settles a hold invoice"""
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            lnd_adapter.settle_hold_invoice(preimage)
+            return True
+
         request = invoices_pb2.SettleInvoiceMsg(preimage=bytes.fromhex(preimage))
         invoicesstub = invoices_pb2_grpc.InvoicesStub(cls.channel)
         response = invoicesstub.SettleInvoice(request)
@@ -246,6 +301,21 @@ class LNDNode:
     ):
         """Generates hold invoice"""
         hold_payment = {}
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            response = lnd_adapter.gen_hold_invoice(
+                description,
+                num_satoshis,
+                invoice_expiry,
+                cltv_expiry_blocks,
+            )
+            hold_payment["invoice"] = response.payment_request
+            hold_payment["preimage"] = response.preimage
+            hold_payment["payment_hash"] = response.payment_hash
+            hold_payment["created_at"] = response.created_at
+            hold_payment["expires_at"] = response.expires_at
+            hold_payment["cltv_expiry"] = response.cltv_expiry
+            return hold_payment
+
         # The preimage is a random hash of 256 bits entropy
         preimage = hashlib.sha256(secrets.token_bytes(nbytes=32)).digest()
 
@@ -283,6 +353,15 @@ class LNDNode:
     def validate_hold_invoice_locked(cls, lnpayment):
         """Checks if hold invoice is locked"""
         from api.models import LNPayment
+
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            response = lnd_adapter.lookup_invoice(lnpayment.payment_hash)
+            if response.state == "ACCEPTED":
+                lnpayment.expiry_height = response.expiry_height
+                lnpayment.status = LNPayment.Status.LOCKED
+                lnpayment.save(update_fields=["expiry_height", "status"])
+                return True
+            return None
 
         request = invoices_pb2.LookupInvoiceMsg(
             payment_hash=bytes.fromhex(lnpayment.payment_hash)
@@ -327,6 +406,12 @@ class LNDNode:
         }
 
         try:
+            if lnd_adapter.LND_ADAPTER_ENABLED:
+                response = lnd_adapter.lookup_invoice(lnpayment.payment_hash)
+                status = lnd_response_state_to_lnpayment_status[response.state_code]
+                expiry_height = response.expiry_height
+                return status, expiry_height
+
             # this is similar to LNNnode.validate_hold_invoice_locked
             request = invoices_pb2.LookupInvoiceMsg(
                 payment_hash=bytes.fromhex(lnpayment.payment_hash)
@@ -638,6 +723,17 @@ class LNDNode:
                 results = {"succeded": True}
                 return results
 
+        policy_result = payout_policy.handle_ln_payment(
+            lnpayment,
+            order,
+            fee_limit_sat,
+            timeout_seconds,
+            handle_response,
+            lightning_pb2,
+        )
+        if policy_result is not None:
+            return policy_result
+
         try:
             routerstub = router_pb2_grpc.RouterStub(cls.channel)
             for response in routerstub.SendPaymentV2(request):
@@ -723,6 +819,18 @@ class LNDNode:
 
         from api.models import LNPayment
 
+        policy_result = payout_policy.handle_keysend_payment(
+            target_pubkey,
+            message,
+            num_satoshis,
+            routing_budget_sats,
+            timeout,
+            sign,
+            LNPayment,
+        )
+        if policy_result is not None:
+            return policy_result
+
         ALLOW_SELF_KEYSEND = config("ALLOW_SELF_KEYSEND", cast=bool, default=False)
         keysend_payment = {}
         keysend_payment["created_at"] = timezone.now()
@@ -797,6 +905,10 @@ class LNDNode:
     @classmethod
     def double_check_htlc_is_settled(cls, payment_hash):
         """Just as it sounds. Better safe than sorry!"""
+        if lnd_adapter.LND_ADAPTER_ENABLED:
+            response = lnd_adapter.lookup_invoice(payment_hash)
+            return response.state == "SETTLED"
+
         request = invoices_pb2.LookupInvoiceMsg(
             payment_hash=bytes.fromhex(payment_hash)
         )

@@ -339,4 +339,7 @@ def send_notification(order_id=None, chat_message_id=None, message=None):
     elif message == "lightning_failed":
         notifications.lightning_failed(order)
 
+    elif message == "payout_policy_rejected":
+        notifications.payout_policy_rejected(order)
+
     return

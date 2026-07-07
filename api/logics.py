@@ -7,6 +7,7 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 
 from api.lightning.node import LNNode
+from api.lightning import payout_policy
 from api.errors import new_error
 from api.models import Currency, LNPayment, MarketTick, OnchainPayment, Order, TakeOrder
 from api.tasks import send_devfund_donation, send_notification, nostr_send_order_event
@@ -1811,6 +1812,21 @@ class Logics:
         new_proceeds = int(slashed_satoshis * (1 - reward_fraction))
         order.proceeds += new_proceeds
         order.save(update_fields=["proceeds"])
+
+        source_result = payout_policy.record_reward_source(
+            order=order,
+            slashed_bond=slashed_bond,
+            staked_bond=staked_bond,
+            reward=reward,
+            reason="slashed_bond" if slashed_bond is not None else "counterparty_cancelled",
+        )
+        if source_result is False:
+            order.log(
+                "Payout policy middleware rejected the structured reward source; "
+                "reward withdrawal will fail closed",
+                level="ERROR",
+            )
+
         send_devfund_donation.delay(order.id, new_proceeds, "slashed bond")
         order.log(
             f"Robot({rewarded_robot.id},{rewarded_robot.user.username}) was rewarded {reward} Sats. {slashed_robot_log}"
@@ -1858,6 +1874,8 @@ class Logics:
                 receiver=user,
                 invoice=invoice,
                 num_satoshis=num_satoshis,
+                routing_budget_ppm=routing_budget_ppm,
+                routing_budget_sats=routing_budget_sats,
                 description=reward_payout["description"],
                 payment_hash=reward_payout["payment_hash"],
                 created_at=reward_payout["created_at"],
@@ -1867,22 +1885,57 @@ class Logics:
         except Exception:
             return False, new_error(3004)
 
-        user.robot.earned_rewards = 0
-        user.robot.save(update_fields=["earned_rewards"])
+        # Keep routing_budget_ppm and routing_budget_sats on the LNPayment row.
+        # The middleware reloads this row from Postgres and rejects if the
+        # request does not match the DB values.
+        # Pays the invoice through the payout policy middleware.
+        # The middleware validates the reward against the DB before sending.
+        policy_result = payout_policy.handle_reward_withdrawal(
+            lnpayment,
+            cls._compute_reward_fee_limit(num_satoshis),
+            int(config("PAYOUT_POLICY_REWARD_TIMEOUT_SECONDS", default=170)),
+        )
+        if policy_result is False:
+            # Middleware rejected or fail-closed. Rewards were not reserved yet.
+            return False, new_error(3006)
+        if policy_result is None:
+            # Middleware disabled, fall through to direct payout below.
+            paid, failure_reason = LNNode.pay_invoice(lnpayment)
+            if paid:
+                user.robot.earned_rewards = 0
+                user.robot.claimed_rewards += num_satoshis
+                user.robot.save(update_fields=["earned_rewards", "claimed_rewards"])
+                return True, None
 
-        # Pays the invoice.
-        paid, failure_reason = LNNode.pay_invoice(lnpayment)
-        if paid:
-            user.robot.earned_rewards = 0
-            user.robot.claimed_rewards += num_satoshis
-            user.robot.save(update_fields=["earned_rewards", "claimed_rewards"])
-            return True, None
-
-        # If fails, adds the rewards again.
-        else:
-            user.robot.earned_rewards = num_satoshis
-            user.robot.save(update_fields=["earned_rewards"])
             return False, new_error(3005, {"failure_reason": failure_reason})
+
+        elif isinstance(policy_result, dict) and policy_result.get("in_flight"):
+            # Payment is already with LND. Reserve rewards at zero so the same
+            # balance cannot be withdrawn again while the payment resolves.
+            user.robot.earned_rewards = 0
+            user.robot.save(update_fields=["earned_rewards"])
+            return False, {"context": policy_result.get("context", "reward payout in flight")}
+
+        elif isinstance(policy_result, dict) and not policy_result.get("succeded"):
+            # Middleware returned a terminal failure before rewards were reserved.
+            return False, {"context": policy_result.get("context", "reward payout failed")}
+
+        # Middleware already paid or confirmed the payment. Do not call
+        # LNNode.pay_invoice() again.
+        user.robot.earned_rewards = 0
+        user.robot.claimed_rewards += num_satoshis
+        user.robot.save(update_fields=["earned_rewards", "claimed_rewards"])
+        return True, None
+
+    @classmethod
+    def _compute_reward_fee_limit(cls, num_satoshis):
+        """Computes the fee limit for reward payouts."""
+        return int(
+            max(
+                num_satoshis * float(config("PROPORTIONAL_ROUTING_FEE_LIMIT")),
+                float(config("MIN_FLAT_ROUTING_FEE_LIMIT_REWARD")),
+            )
+        )
 
     @classmethod
     def compute_proceeds(cls, order):

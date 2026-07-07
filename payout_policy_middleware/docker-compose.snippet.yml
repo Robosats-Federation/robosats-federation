@@ -1,0 +1,21 @@
+services:
+  payout-policy:
+    build:
+      context: ./payout_policy_middleware
+      args:
+        LND_VERSION: ${LND_VERSION}
+    container_name: payoutpolicy${SUFFIX}
+    restart: always
+    depends_on:
+      - tor
+      - postgres
+    env_file:
+      - ${PAYOUT_POLICY_ENVS_FILE}
+    volumes:
+      - ${LND_DATA}:/run/lnd:ro
+    network_mode: service:tor
+    healthcheck:
+      test: ["CMD", "/app/payout-policy", "readyz-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
