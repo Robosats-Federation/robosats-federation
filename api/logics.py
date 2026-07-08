@@ -1904,7 +1904,7 @@ class Logics:
             )
             new_proceeds = int(order.trade_escrow.num_satoshis - payout_sats)
         else:
-            payout_sats = order.payout.num_satoshis + order.payout.fee
+            payout_sats = order.payout.num_satoshis + order.payout.routing_budget_sats
             new_proceeds = int(order.trade_escrow.num_satoshis - payout_sats)
 
         order.proceeds += new_proceeds
