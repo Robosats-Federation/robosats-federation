@@ -38,45 +38,45 @@ jobs:
         fi
 
   frontend-build:
-    uses: RoboSats/robosats/.github/workflows/frontend-build.yml@main
+    uses: ./.github/workflows/frontend-build.yml
     needs: check-versions
     with:
       semver: ${{ needs.check-versions.outputs.semver }}
 
   integration-tests:
-    uses: RoboSats/robosats/.github/workflows/integration-tests.yml@main
+    uses: ./.github/workflows/integration-tests.yml
     needs: [frontend-build, check-versions]
 
   coordinator-image:
-    uses: RoboSats/robosats/.github/workflows/coordinator-image.yml@main
+    uses: ./.github/workflows/coordinator-image.yml
     needs: [frontend-build, integration-tests, check-versions]
     secrets: inherit
     with:
       semver: ${{ needs.check-versions.outputs.semver }}
 
   selfhosted-client-image:
-    uses: RoboSats/robosats/.github/workflows/selfhosted-client-image.yml@main
+    uses: ./.github/workflows/selfhosted-client-image.yml
     needs: [frontend-build, check-versions]
     secrets: inherit
     with:
       semver: ${{ needs.check-versions.outputs.semver }}
 
   web-client-image:
-    uses: RoboSats/robosats/.github/workflows/web-client-image.yml@main
+    uses: ./.github/workflows/web-client-image.yml
     needs: [frontend-build, check-versions]
     secrets: inherit
     with:
       semver: ${{ needs.check-versions.outputs.semver }}
 
   android-build:
-    uses: RoboSats/robosats/.github/workflows/android-build.yml@main
+    uses: ./.github/workflows/android-build.yml
     needs: [frontend-build, check-versions]
     secrets: inherit
     with:
       semver: ${{ needs.check-versions.outputs.semver }}
 
   desktop-build:
-    uses: RoboSats/robosats/.github/workflows/desktop-build.yml@main
+    uses: ./.github/workflows/desktop-build.yml
     needs: [frontend-build, check-versions]
     secrets: inherit
     with:
