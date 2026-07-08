@@ -31,6 +31,22 @@ maker_form_buy_with_range = {
     "longitude": 135.503,
 }
 
+maker_form_sell_with_range = {
+    "type": Order.Types.SELL,
+    "currency": 1,
+    "has_range": True,
+    "min_amount": 84,
+    "max_amount": 201.7,
+    "payment_method": "Revolut",
+    "is_explicit": False,
+    "premium": 3.34,
+    "public_duration": 69360,
+    "escrow_duration": 8700,
+    "bond_size": 3.5,
+    "latitude": 34.7455,
+    "longitude": 135.503,
+}
+
 
 def read_file(file_path):
     """
